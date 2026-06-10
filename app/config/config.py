@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     commands_config_path: Path = Field(
         default=Path("commands.json"), description="Webhook commands config path"
     )
+    bot_token: Optional[str] = Field(default=None, description="Telegram bot token")
+    chat_id: Optional[str] = Field(default=None, description="Telegram chat id")
+    command_timeout_seconds: int = Field(
+        default=600, description="Command execution timeout in seconds"
+    )
 
     # API documentation
     docs_url: Optional[str] = Field(default="/docs", description="Swagger docs URL")

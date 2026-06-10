@@ -7,7 +7,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from fastapi import BackgroundTasks
 from fastapi import HTTPException
 
 from app.models.webhook import CommandResult, CommandsConfig, GitHubWebhookCommand
@@ -16,6 +18,7 @@ from app.utils.webhook import (
     CommandExecutionError,
     execute_commands,
     load_commands_config,
+    send_telegram_message,
     verify_github_signature,
 )
 
@@ -144,7 +147,7 @@ class WebhookHandlerTests(unittest.TestCase):
 
         self.assertEqual(error.exception.status_code, 401)
 
-    def test_handle_github_webhook_returns_success_response(self):
+    def test_handle_github_webhook_schedules_background_task_and_returns_success(self):
         scenario = GitHubWebhookCommand(
             name="backend-deploy",
             route="/webhooks/github/backend",
@@ -153,25 +156,33 @@ class WebhookHandlerTests(unittest.TestCase):
         )
         body = b'{"ref":"refs/heads/master"}'
         signature = github_signature("secret", body)
+        calls = []
 
         async def runner(commands):
-            self.assertEqual(commands, ["echo ok"])
+            calls.append(commands)
             return []
 
         async def call_handler():
-            return await webhook.handle_github_webhook(
+            background_tasks = BackgroundTasks()
+            response = await webhook.handle_github_webhook(
                 scenario=scenario,
                 body=body,
                 signature_header=signature,
+                background_tasks=background_tasks,
                 runner=runner,
             )
+            self.assertEqual(calls, [])
+            await background_tasks()
+            return response
 
         response = asyncio.run(call_handler())
 
         self.assertEqual(response["status"], "success")
         self.assertEqual(response["name"], "backend-deploy")
+        self.assertEqual(response["message"], "Webhook scenario accepted")
+        self.assertEqual(calls, [["echo ok"]])
 
-    def test_handle_github_webhook_returns_conflict_when_scenario_is_running(self):
+    def test_handle_github_webhook_returns_conflict_while_background_task_is_pending(self):
         scenario = GitHubWebhookCommand(
             name="backend-deploy",
             route="/webhooks/github/backend",
@@ -180,41 +191,35 @@ class WebhookHandlerTests(unittest.TestCase):
         )
         body = b"{}"
         signature = github_signature("secret", body)
-        first_started = asyncio.Event()
-        release_first = asyncio.Event()
 
         async def runner(commands):
-            first_started.set()
-            await release_first.wait()
             return []
 
         async def call_twice():
-            first_call = asyncio.create_task(
-                webhook.handle_github_webhook(
+            background_tasks = BackgroundTasks()
+            await webhook.handle_github_webhook(
+                scenario=scenario,
+                body=body,
+                signature_header=signature,
+                background_tasks=background_tasks,
+                runner=runner,
+            )
+
+            with self.assertRaises(HTTPException) as error:
+                await webhook.handle_github_webhook(
                     scenario=scenario,
                     body=body,
                     signature_header=signature,
+                    background_tasks=BackgroundTasks(),
                     runner=runner,
                 )
-            )
-            await first_started.wait()
+            self.assertEqual(error.exception.status_code, 409)
 
-            try:
-                with self.assertRaises(HTTPException) as error:
-                    await webhook.handle_github_webhook(
-                        scenario=scenario,
-                        body=body,
-                        signature_header=signature,
-                        runner=runner,
-                    )
-                self.assertEqual(error.exception.status_code, 409)
-            finally:
-                release_first.set()
-                await first_call
+            await background_tasks()
 
         asyncio.run(call_twice())
 
-    def test_handle_github_webhook_maps_command_error_to_http_error(self):
+    def test_background_command_error_releases_scenario_lock(self):
         scenario = GitHubWebhookCommand(
             name="backend-deploy",
             route="/webhooks/github/backend",
@@ -230,19 +235,50 @@ class WebhookHandlerTests(unittest.TestCase):
             stderr="failed",
         )
 
-        async def runner(commands):
+        async def failing_runner(commands):
             raise CommandExecutionError(result=result, completed_results=[result])
 
-        async def call_handler():
-            return await webhook.handle_github_webhook(
+        async def successful_runner(commands):
+            return []
+
+        async def run_test():
+            background_tasks = BackgroundTasks()
+            response = await webhook.handle_github_webhook(
                 scenario=scenario,
                 body=body,
                 signature_header=signature,
-                runner=runner,
+                background_tasks=background_tasks,
+                runner=failing_runner,
             )
+            await background_tasks()
+            self.assertEqual(response["status"], "success")
 
-        with self.assertRaises(HTTPException) as error:
-            asyncio.run(call_handler())
+            next_tasks = BackgroundTasks()
+            next_response = await webhook.handle_github_webhook(
+                scenario=scenario,
+                body=body,
+                signature_header=signature,
+                background_tasks=next_tasks,
+                runner=successful_runner,
+            )
+            await next_tasks()
+            self.assertEqual(next_response["status"], "success")
 
-        self.assertEqual(error.exception.status_code, 500)
-        self.assertEqual(error.exception.detail["status"], "error")
+        asyncio.run(run_test())
+
+
+class TelegramNotificationTests(unittest.TestCase):
+    def test_send_telegram_message_skips_missing_settings(self):
+        self.assertFalse(send_telegram_message(None, "1", "ok"))
+        self.assertFalse(send_telegram_message("token", None, "ok"))
+
+    def test_send_telegram_message_posts_to_telegram(self):
+        with patch("app.utils.webhook.urlopen") as urlopen:
+            self.assertTrue(send_telegram_message("token", "123", "deploy ok"))
+
+        request = urlopen.call_args.args[0]
+        self.assertEqual(
+            request.full_url, "https://api.telegram.org/bottoken/sendMessage"
+        )
+        self.assertIn(b"chat_id=123", request.data)
+        self.assertIn(b"text=deploy+ok", request.data)

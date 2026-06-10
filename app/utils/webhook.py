@@ -6,6 +6,8 @@ import shlex
 import subprocess
 from pathlib import Path
 from typing import Sequence
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from loguru import logger
 from pydantic import ValidationError
@@ -50,16 +52,20 @@ def verify_github_signature(
     return hmac.compare_digest(f"sha256={digest}", signature_header)
 
 
-async def run_commands_async(commands: Sequence[str]) -> list[CommandResult]:
-    return await asyncio.to_thread(execute_commands, commands)
+async def run_commands_async(
+    commands: Sequence[str], timeout_seconds: int = 600
+) -> list[CommandResult]:
+    return await asyncio.to_thread(execute_commands, commands, timeout_seconds)
 
 
-def execute_commands(commands: Sequence[str]) -> list[CommandResult]:
+def execute_commands(
+    commands: Sequence[str], timeout_seconds: int = 600
+) -> list[CommandResult]:
     cwd = Path.cwd()
     results: list[CommandResult] = []
 
     for command in commands:
-        result, cwd = _run_command(command, cwd)
+        result, cwd = _run_command(command, cwd, timeout_seconds)
         results.append(result)
         _log_command_result(result)
 
@@ -69,7 +75,9 @@ def execute_commands(commands: Sequence[str]) -> list[CommandResult]:
     return results
 
 
-def _run_command(command: str, cwd: Path) -> tuple[CommandResult, Path]:
+def _run_command(
+    command: str, cwd: Path, timeout_seconds: int
+) -> tuple[CommandResult, Path]:
     logger.info("Executing webhook command: {}", command)
     args = shlex.split(command)
     if not args:
@@ -89,7 +97,9 @@ def _run_command(command: str, cwd: Path) -> tuple[CommandResult, Path]:
             cwd=cwd,
             capture_output=True,
             check=False,
+            stdin=subprocess.DEVNULL,
             text=True,
+            timeout=timeout_seconds,
         )
         result = CommandResult(
             command=command,
@@ -101,11 +111,20 @@ def _run_command(command: str, cwd: Path) -> tuple[CommandResult, Path]:
         result = CommandResult(
             command=command, returncode=127, stdout="", stderr=str(exc)
         )
+    except subprocess.TimeoutExpired as exc:
+        result = CommandResult(
+            command=command,
+            returncode=124,
+            stdout=exc.stdout or "",
+            stderr=f"Command timed out after {timeout_seconds} seconds",
+        )
 
     return result, cwd
 
 
-def _change_dir(command: str, args: list[str], cwd: Path) -> tuple[CommandResult, Path]:
+def _change_dir(
+    command: str, args: list[str], cwd: Path
+) -> tuple[CommandResult, Path]:
     if len(args) != 2:
         return (
             CommandResult(
@@ -134,7 +153,12 @@ def _change_dir(command: str, args: list[str], cwd: Path) -> tuple[CommandResult
         )
 
     return (
-        CommandResult(command=command, returncode=0, stdout=f"cwd={target}", stderr=""),
+        CommandResult(
+            command=command,
+            returncode=0,
+            stdout=f"cwd={target}",
+            stderr="",
+        ),
         target,
     )
 
@@ -149,3 +173,24 @@ def _log_command_result(result: CommandResult) -> None:
         logger.info("Webhook command stdout: {}", result.stdout.strip())
     if result.stderr:
         logger.warning("Webhook command stderr: {}", result.stderr.strip())
+
+
+def send_telegram_message(
+    bot_token: str | None, chat_id: str | None, text: str
+) -> bool:
+    if not bot_token or not chat_id:
+        return False
+
+    data = urlencode({"chat_id": chat_id, "text": text}).encode("utf-8")
+    request = Request(
+        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+        data=data,
+        method="POST",
+    )
+
+    try:
+        with urlopen(request, timeout=10):
+            return True
+    except OSError as exc:
+        logger.warning("Telegram notification failed: {}", exc)
+        return False

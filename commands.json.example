@@ -7,7 +7,7 @@
       "commands": [
         "cd /path/to/project",
         "git pull origin master",
-        "systemctl restart my-backend"
+        "sudo -n /usr/bin/systemctl restart my-backend"
       ]
     }
   ]

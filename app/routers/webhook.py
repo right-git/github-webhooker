@@ -1,7 +1,8 @@
+import asyncio
 import threading
 from typing import Awaitable, Callable, Sequence
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from loguru import logger
 
 from app.config.config import settings
@@ -10,6 +11,7 @@ from app.utils.webhook import (
     CommandExecutionError,
     load_commands_config,
     run_commands_async,
+    send_telegram_message,
     verify_github_signature,
 )
 
@@ -17,11 +19,16 @@ WebhookRunner = Callable[[Sequence[str]], Awaitable[list[CommandResult]]]
 _scenario_locks: dict[str, threading.Lock] = {}
 
 
+async def _run_configured_commands(commands: Sequence[str]) -> list[CommandResult]:
+    return await run_commands_async(commands, settings.command_timeout_seconds)
+
+
 async def handle_github_webhook(
     scenario: GitHubWebhookCommand,
     body: bytes,
     signature_header: str | None,
-    runner: WebhookRunner = run_commands_async,
+    background_tasks: BackgroundTasks | None = None,
+    runner: WebhookRunner = _run_configured_commands,
 ) -> dict:
     if not verify_github_signature(scenario.secret, body, signature_header):
         logger.warning("Invalid GitHub signature: {}", scenario.name)
@@ -42,8 +49,25 @@ async def handle_github_webhook(
             },
         )
 
+    if background_tasks is None:
+        background_tasks = BackgroundTasks()
+
+    logger.info("GitHub webhook accepted: {}", scenario.name)
+    background_tasks.add_task(_run_webhook_commands, scenario, lock, runner)
+    return {
+        "status": "success",
+        "message": "Webhook scenario accepted",
+        "name": scenario.name,
+    }
+
+
+async def _run_webhook_commands(
+    scenario: GitHubWebhookCommand,
+    lock: threading.Lock,
+    runner: WebhookRunner,
+) -> None:
     try:
-        logger.info("GitHub webhook triggered: {}", scenario.name)
+        logger.info("GitHub webhook background started: {}", scenario.name)
         results = await runner(scenario.commands)
     except CommandExecutionError as exc:
         logger.error(
@@ -51,29 +75,28 @@ async def handle_github_webhook(
             scenario.name,
             exc.result.command,
         )
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "status": "error",
-                "message": "Webhook command failed",
-                "name": scenario.name,
-                "failed_command": exc.result.model_dump(),
-                "completed_results": [
-                    result.model_dump() for result in exc.completed_results
-                ],
-            },
-        ) from exc
+        await _notify(
+            f"GitHub webhook failed: {scenario.name}\n"
+            f"Command: {exc.result.command}\n"
+            f"Error: {exc.result.stderr or exc.result.returncode}"
+        )
+    except Exception as exc:
+        logger.exception("GitHub webhook failed: name={} error={}", scenario.name, exc)
+        await _notify(f"GitHub webhook failed: {scenario.name}\nError: {exc}")
+    else:
+        logger.info("GitHub webhook completed: {}", scenario.name)
+        await _notify(
+            f"GitHub webhook completed: {scenario.name}\n"
+            f"Commands executed: {len(results)}"
+        )
     finally:
         lock.release()
 
-    logger.info("GitHub webhook completed: {}", scenario.name)
-    return {
-        "status": "success",
-        "message": "Webhook scenario executed",
-        "name": scenario.name,
-        "commands_executed": len(results),
-        "results": [result.model_dump() for result in results],
-    }
+
+async def _notify(text: str) -> None:
+    await asyncio.to_thread(
+        send_telegram_message, settings.bot_token, settings.chat_id, text
+    )
 
 
 def create_router(config: CommandsConfig) -> APIRouter:
@@ -103,11 +126,12 @@ def create_router(config: CommandsConfig) -> APIRouter:
 
 
 def _github_endpoint(scenario: GitHubWebhookCommand):
-    async def endpoint(request: Request):
+    async def endpoint(request: Request, background_tasks: BackgroundTasks):
         return await handle_github_webhook(
             scenario=scenario,
             body=await request.body(),
             signature_header=request.headers.get("X-Hub-Signature-256"),
+            background_tasks=background_tasks,
         )
 
     endpoint.__name__ = f"github_webhook_{scenario.name.replace('-', '_')}"
