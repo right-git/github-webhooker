@@ -1,15 +1,27 @@
 from pathlib import Path
 from typing import List, Optional
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
 
 class Settings(BaseSettings):
     """Application settings using Pydantic BaseSettings."""
 
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
     # Environment configuration
     env: str = Field(default="dev", description="Environment (dev/prod)")
-    debug: bool = Field(default=False, description="Enable verbose request logging")
+    port: int = Field(default=8081, description="Application port")
+    debug: bool = Field(
+        default=False,
+        validation_alias="APP_DEBUG",
+        description="Enable verbose request logging",
+    )
     commands_config_path: Path = Field(
         default=Path("commands.json"), description="Webhook commands config path"
     )
@@ -22,11 +34,6 @@ class Settings(BaseSettings):
     origins: List[str] = Field(
         default_factory=lambda: ["*"], description="CORS allowed origins"
     )
-
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
