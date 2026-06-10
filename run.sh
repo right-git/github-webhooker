@@ -15,7 +15,7 @@ export PYTHONPATH=$(pwd)
 # Set reload flag depending on ENV variable
 if [ "$ENV" = "prod" ]; then
     RELOAD=""
-     uv run uvicorn app.__main__:app --host "0.0.0.0" --port "$PORT"
+     uv run uvicorn app.main:app --host "0.0.0.0" --port "$PORT"
 else
-    uv run uvicorn app.__main__:app --host "127.0.0.1" --port "$PORT" --reload  
+    uv run uvicorn app.main:app --host "127.0.0.1" --port "$PORT" --reload  
 fi
