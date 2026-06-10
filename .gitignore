@@ -1,0 +1,27 @@
+# Virtual environments
+.venv/
+venv/
+
+# Env files
+.env
+local.env
+
+# Cache
+__pycache__/
+app/__pycache__/
+
+# Volumes
+volumes/
+
+# Config files
+.idea/
+.vscode/
+
+# Log files
+requests.log
+
+# Keys
+certs/
+
+# Others
+.history/
