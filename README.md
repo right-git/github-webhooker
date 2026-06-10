@@ -40,9 +40,16 @@ Fields:
 - `secret` - GitHub webhook secret. Use the same value in GitHub settings.
 - `commands` - commands executed in order after the signature is valid.
 
-Commands are split with `shlex` and executed through `subprocess.run` without
-`shell=True`. Use simple commands with arguments. `cd /path` is supported and
-changes the working directory for following commands.
+Simple commands are split with `shlex` and executed without `shell=True`.
+Commands that contain shell operators such as `>`, `2>&1`, `&`, `$`, `|`, or
+`;` are executed through `/bin/bash`, so deploy commands like this are supported:
+
+```json
+"nohup bash run.sh > logs/backend.log 2>&1 & echo $! > .backend.pid"
+```
+
+`cd /path` is supported and changes the working directory for following
+commands.
 
 ## GitHub Setup
 

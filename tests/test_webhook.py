@@ -121,6 +121,20 @@ class CommandExecutionTests(unittest.TestCase):
         self.assertEqual(error.exception.result.returncode, 7)
         self.assertEqual(len(error.exception.completed_results), 1)
 
+    def test_execute_commands_supports_shell_background_syntax(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_path = Path(tmp) / "backend.pid"
+            results = execute_commands(
+                [
+                    f"cd {shlex.quote(tmp)}",
+                    "sleep 0.1 > backend.log 2>&1 & echo $! > backend.pid",
+                ],
+                timeout_seconds=1,
+            )
+
+            self.assertEqual([result.returncode for result in results], [0, 0])
+            self.assertTrue(pid_path.read_text(encoding="utf-8").strip())
+
 
 class WebhookHandlerTests(unittest.TestCase):
     def test_handle_github_webhook_rejects_invalid_signature(self):

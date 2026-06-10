@@ -91,13 +91,29 @@ def _run_command(
     if args[0] == "cd":
         return _change_dir(command, args, cwd)
 
+    if _needs_shell(command):
+        return _run_subprocess(command, cwd, timeout_seconds, shell=True)
+
+    return _run_subprocess(args, cwd, timeout_seconds)
+
+
+def _run_subprocess(
+    args: str | list[str],
+    cwd: Path,
+    timeout_seconds: int,
+    shell: bool = False,
+) -> tuple[CommandResult, Path]:
+    command = args if isinstance(args, str) else " ".join(args)
+    executable = "/bin/bash" if shell else None
     try:
         completed = subprocess.run(
             args,
             cwd=cwd,
             capture_output=True,
             check=False,
+            executable=executable,
             stdin=subprocess.DEVNULL,
+            shell=shell,
             text=True,
             timeout=timeout_seconds,
         )
@@ -120,6 +136,10 @@ def _run_command(
         )
 
     return result, cwd
+
+
+def _needs_shell(command: str) -> bool:
+    return any(token in command for token in ("|", "&", ";", "<", ">", "$", "`", "\n"))
 
 
 def _change_dir(
