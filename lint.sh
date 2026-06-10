@@ -1,0 +1,1 @@
+uv run black app/ && uv run flake8 app/ --max-line-length=120 --exclude=__init__.py --ignore=E203,W503,E226

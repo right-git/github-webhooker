@@ -9,6 +9,10 @@ class Settings(BaseSettings):
 
     # Environment configuration
     env: str = Field(default="dev", description="Environment (dev/prod)")
+    debug: bool = Field(default=False, description="Enable verbose request logging")
+    commands_config_path: Path = Field(
+        default=Path("commands.json"), description="Webhook commands config path"
+    )
 
     # API documentation
     docs_url: Optional[str] = Field(default="/docs", description="Swagger docs URL")

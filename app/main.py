@@ -35,5 +35,10 @@ app.add_middleware(
 )
 
 
-# Admin routes
+# Webhook routes
 app.include_router(webhook.router)
+
+
+@app.get("/", tags=["Root"])
+async def root():
+    return {"status": "online", "message": "Github Webhooker is running"}

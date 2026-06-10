@@ -6,6 +6,9 @@ venv/
 .env
 local.env
 
+# Webhook commands with secrets
+commands.json
+
 # Cache
 __pycache__/
 app/__pycache__/
