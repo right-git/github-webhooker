@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -12,7 +13,13 @@ from unittest.mock import patch
 from fastapi import BackgroundTasks
 from fastapi import HTTPException
 
-from app.models.webhook import CommandResult, CommandsConfig, GitHubWebhookCommand
+from app.models.webhook import (
+    CommandResult,
+    CommandsConfig,
+    GitHubWebhookCommand,
+    ManualWebhookCommand,
+    RateLimitConfig,
+)
 from app.routers import webhook
 from app.utils.webhook import (
     CommandExecutionError,
@@ -77,13 +84,22 @@ class WebhookConfigTests(unittest.TestCase):
                     secret="secret",
                     commands=["echo ok"],
                 )
-            ]
+            ],
+            manual=[
+                ManualWebhookCommand(
+                    name="manual-deploy",
+                    route="/manual/backend",
+                    password="password",
+                    commands=["echo ok"],
+                )
+            ],
         )
 
         test_router = webhook.create_router(config)
         route_paths = {route.path for route in test_router.routes}
 
         self.assertIn("/webhooks/github/backend", route_paths)
+        self.assertIn("/manual/backend", route_paths)
         self.assertIn("/webhooks/github/{unknown_path:path}", route_paths)
 
 
@@ -137,6 +153,9 @@ class CommandExecutionTests(unittest.TestCase):
 
 
 class WebhookHandlerTests(unittest.TestCase):
+    def setUp(self):
+        webhook._manual_rate_limits.clear()
+
     def test_handle_github_webhook_rejects_invalid_signature(self):
         scenario = GitHubWebhookCommand(
             name="backend-deploy",
@@ -279,6 +298,98 @@ class WebhookHandlerTests(unittest.TestCase):
             self.assertEqual(next_response["status"], "success")
 
         asyncio.run(run_test())
+
+
+class ManualWebhookHandlerTests(unittest.TestCase):
+    def setUp(self):
+        webhook._manual_rate_limits.clear()
+
+    def test_handle_manual_webhook_requires_basic_password_prompt(self):
+        scenario = ManualWebhookCommand(
+            name="manual-deploy",
+            route="/manual/backend",
+            password="password",
+            commands=["echo ok"],
+        )
+
+        async def runner(commands):
+            raise AssertionError("runner must not be called")
+
+        async def call_handler():
+            return await webhook.handle_manual_webhook(
+                scenario=scenario,
+                authorization_header=None,
+                client_id="127.0.0.1",
+                runner=runner,
+            )
+
+        with self.assertRaises(HTTPException) as error:
+            asyncio.run(call_handler())
+
+        self.assertEqual(error.exception.status_code, 401)
+        self.assertEqual(
+            error.exception.headers["WWW-Authenticate"],
+            'Basic realm="github-webhooker"',
+        )
+
+    def test_handle_manual_webhook_schedules_background_task_after_password(self):
+        scenario = ManualWebhookCommand(
+            name="manual-deploy",
+            route="/manual/backend",
+            password="password",
+            commands=["echo ok"],
+        )
+        authorization = "Basic " + base64.b64encode(b"user:password").decode("ascii")
+        calls = []
+
+        async def runner(commands):
+            calls.append(commands)
+            return []
+
+        async def call_handler():
+            background_tasks = BackgroundTasks()
+            response = await webhook.handle_manual_webhook(
+                scenario=scenario,
+                authorization_header=authorization,
+                client_id="127.0.0.1",
+                background_tasks=background_tasks,
+                runner=runner,
+            )
+            self.assertEqual(calls, [])
+            await background_tasks()
+            return response
+
+        response = asyncio.run(call_handler())
+
+        self.assertEqual(response["status"], "success")
+        self.assertEqual(response["name"], "manual-deploy")
+        self.assertEqual(calls, [["echo ok"]])
+
+    def test_handle_manual_webhook_rate_limits_password_attempts(self):
+        scenario = ManualWebhookCommand(
+            name="manual-deploy",
+            route="/manual/backend",
+            password="password",
+            commands=["echo ok"],
+            rate_limit=RateLimitConfig(requests=1, seconds=60),
+        )
+        authorization = "Basic " + base64.b64encode(b"user:wrong").decode("ascii")
+
+        async def runner(commands):
+            raise AssertionError("runner must not be called")
+
+        async def call_handler():
+            for expected_status in (401, 429):
+                with self.assertRaises(HTTPException) as error:
+                    await webhook.handle_manual_webhook(
+                        scenario=scenario,
+                        authorization_header=authorization,
+                        client_id="127.0.0.1",
+                        runner=runner,
+                    )
+                self.assertEqual(error.exception.status_code, expected_status)
+
+        asyncio.run(call_handler())
 
 
 class TelegramNotificationTests(unittest.TestCase):

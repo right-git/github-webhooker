@@ -10,5 +10,21 @@
         "sudo -n /usr/bin/systemctl restart my-backend"
       ]
     }
+  ],
+  "manual": [
+    {
+      "name": "manual-backend-deploy",
+      "route": "/manual/backend",
+      "password": "CHANGE_ME",
+      "rate_limit": {
+        "requests": 5,
+        "seconds": 60
+      },
+      "commands": [
+        "cd /path/to/project",
+        "git pull origin master",
+        "nohup bash run.sh > logs/backend.log 2>&1 & echo $! > .backend.pid"
+      ]
+    }
   ]
 }

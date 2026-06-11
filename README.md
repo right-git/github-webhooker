@@ -26,7 +26,23 @@ Example:
       "commands": [
         "cd /path/to/project",
         "git pull origin master",
-        "systemctl restart my-backend"
+        "sudo -n /usr/bin/systemctl restart my-backend"
+      ]
+    }
+  ],
+  "manual": [
+    {
+      "name": "manual-backend-deploy",
+      "route": "/manual/backend",
+      "password": "CHANGE_ME",
+      "rate_limit": {
+        "requests": 5,
+        "seconds": 60
+      },
+      "commands": [
+        "cd /path/to/project",
+        "git pull origin master",
+        "nohup bash run.sh > logs/backend.log 2>&1 & echo $! > .backend.pid"
       ]
     }
   ]
@@ -39,6 +55,14 @@ Fields:
 - `route` - POST path FastAPI registers for this scenario.
 - `secret` - GitHub webhook secret. Use the same value in GitHub settings.
 - `commands` - commands executed in order after the signature is valid.
+
+`manual` entries create browser-openable routes. Open the configured `route` in
+the browser, enter any username and the configured `password`, and the service
+will schedule the commands in the background. Manual routes have an in-memory
+rate limit per route and client IP:
+
+- `rate_limit.requests` - allowed attempts in the window.
+- `rate_limit.seconds` - window size in seconds.
 
 Simple commands are split with `shlex` and executed without `shell=True`.
 Commands that contain shell operators such as `>`, `2>&1`, `&`, `$`, `|`, or

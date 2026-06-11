@@ -3,10 +3,9 @@ from typing import List
 from pydantic import BaseModel, Field, field_validator
 
 
-class GitHubWebhookCommand(BaseModel):
+class WebhookCommandBase(BaseModel):
     name: str = Field(min_length=1)
     route: str = Field(min_length=1)
-    secret: str = Field(min_length=1)
     commands: List[str] = Field(min_length=1)
 
     @field_validator("route")
@@ -25,8 +24,23 @@ class GitHubWebhookCommand(BaseModel):
         return value
 
 
+class RateLimitConfig(BaseModel):
+    requests: int = Field(default=5, ge=1)
+    seconds: int = Field(default=60, ge=1)
+
+
+class GitHubWebhookCommand(WebhookCommandBase):
+    secret: str = Field(min_length=1)
+
+
+class ManualWebhookCommand(WebhookCommandBase):
+    password: str = Field(min_length=1)
+    rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
+
+
 class CommandsConfig(BaseModel):
     github: List[GitHubWebhookCommand] = Field(default_factory=list)
+    manual: List[ManualWebhookCommand] = Field(default_factory=list)
 
 
 class CommandResult(BaseModel):
