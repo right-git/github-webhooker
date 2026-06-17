@@ -1,4 +1,3 @@
-import html
 import json
 import random
 import time
@@ -30,7 +29,7 @@ class TelegramNotificationService:
                 {
                     "chat_id": self._config.chat_id,
                     "draft_id": draft_id,
-                    "text": html.escape(current_text.strip(), quote=False),
+                    "text": current_text.strip(),
                     "parse_mode": "HTML",
                 },
             ):
@@ -41,8 +40,9 @@ class TelegramNotificationService:
             "sendMessage",
             {
                 "chat_id": self._config.chat_id,
-                "text": html.escape(message.text, quote=False),
+                "text": message.text,
                 "parse_mode": "HTML",
+                "disable_web_page_preview": True,
             },
         )
 

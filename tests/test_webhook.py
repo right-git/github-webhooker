@@ -241,7 +241,50 @@ class WebhookHandlerTests(unittest.TestCase):
         self.assertEqual(response["message"], "Webhook scenario accepted")
         self.assertEqual(calls, [["echo ok"]])
         self.assertIn("Deploy backend", notifications[0])
-        self.assertIn("Alice Example <alice@example.com>", notifications[0])
+        self.assertIn("👤 <b>Author:</b> Alice Example", notifications[0])
+        self.assertIn("📧 <code>alice@example.com</code>", notifications[0])
+
+    def test_success_message_uses_html_template_and_escapes_context(self):
+        scenario = GitHubWebhookCommand(
+            name="backend <deploy>",
+            route="/webhooks/github/backend",
+            secret="secret",
+            commands=["echo ok"],
+        )
+        context = webhook.GitHubEventContext(
+            event="push",
+            branch="master <prod>",
+            commit_message="Deploy <backend>\n\nDo it safely.",
+            author_name="Alice <Example>",
+            author_email="alice@example.com",
+        )
+
+        message = webhook._success_message(
+            scenario=scenario,
+            results=[
+                CommandResult(command="echo ok", returncode=0, stdout="ok", stderr="")
+            ],
+            context=context,
+        )
+
+        self.assertEqual(
+            message,
+            "\n".join(
+                [
+                    "✅ <b>Webhook completed</b>",
+                    "",
+                    "🚀 <b>Deploy:</b> <code>backend &lt;deploy&gt;</code>",
+                    "⚙️ <b>Commands executed:</b> <code>1</code>",
+                    "🌿 <b>Branch:</b> <code>master &lt;prod&gt;</code>",
+                    "",
+                    "📝 <b>Commit:</b>",
+                    "<blockquote>Deploy &lt;backend&gt; Do it safely.</blockquote>",
+                    "",
+                    "👤 <b>Author:</b> Alice &lt;Example&gt;",
+                    "📧 <code>alice@example.com</code>",
+                ]
+            ),
+        )
 
     def test_handle_github_webhook_ignores_new_branch_push(self):
         scenario = GitHubWebhookCommand(
@@ -597,7 +640,7 @@ class TelegramNotificationTests(unittest.TestCase):
             patch("app.service.notification.telegram.api.time.sleep") as sleep,
             patch("app.service.notification.telegram.api.urlopen") as urlopen,
         ):
-            self.assertTrue(service.send_text("deploy <ok>"))
+            self.assertTrue(service.send_text("deploy <b>ok</b>"))
 
         self.assertEqual(urlopen.call_count, 3)
         requests = [call.args[0] for call in urlopen.call_args_list]
@@ -621,13 +664,14 @@ class TelegramNotificationTests(unittest.TestCase):
                 {
                     "chat_id": "123",
                     "draft_id": 42,
-                    "text": "deploy &lt;ok&gt;",
+                    "text": "deploy <b>ok</b>",
                     "parse_mode": "HTML",
                 },
                 {
                     "chat_id": "123",
-                    "text": "deploy &lt;ok&gt;",
+                    "text": "deploy <b>ok</b>",
                     "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
                 },
             ],
         )

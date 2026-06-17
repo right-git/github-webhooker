@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import binascii
+import html
 import hmac
 import json
 import re
@@ -358,10 +359,12 @@ def _success_message(
     context: GitHubEventContext | None,
 ) -> str:
     lines = [
-        f"Webhook completed: {scenario.name}",
-        f"Commands executed: {len(results)}",
+        "✅ <b>Webhook completed</b>",
+        "",
+        f"🚀 <b>Deploy:</b> <code>{_html(scenario.name)}</code>",
+        f"⚙️ <b>Commands executed:</b> <code>{len(results)}</code>",
     ]
-    lines.extend(_context_lines(context))
+    lines.extend(_context_lines(context, include_commit=True))
     return "\n".join(lines)
 
 
@@ -371,11 +374,13 @@ def _failure_message(
     context: GitHubEventContext | None,
 ) -> str:
     lines = [
-        f"Webhook failed: {scenario.name}",
-        f"Command: {result.command}",
-        f"Error: {result.stderr or result.returncode}",
+        "❌ <b>Webhook failed</b>",
+        "",
+        f"🚀 <b>Deploy:</b> <code>{_html(scenario.name)}</code>",
+        f"⚙️ <b>Command:</b> <code>{_html(result.command)}</code>",
     ]
-    lines.extend(_context_lines(context))
+    lines.extend(_context_lines(context, include_commit=True))
+    lines.extend(_error_lines(result.stderr or str(result.returncode)))
     return "\n".join(lines)
 
 
@@ -384,31 +389,51 @@ def _unexpected_failure_message(
     exc: Exception,
     context: GitHubEventContext | None,
 ) -> str:
-    lines = [f"Webhook failed: {scenario.name}", f"Error: {exc}"]
-    lines.extend(_context_lines(context))
+    lines = [
+        "❌ <b>Webhook failed</b>",
+        "",
+        f"🚀 <b>Deploy:</b> <code>{_html(scenario.name)}</code>",
+    ]
+    lines.extend(_context_lines(context, include_commit=True))
+    lines.extend(_error_lines(str(exc)))
     return "\n".join(lines)
 
 
-def _context_lines(context: GitHubEventContext | None) -> list[str]:
+def _context_lines(
+    context: GitHubEventContext | None, include_commit: bool = False
+) -> list[str]:
     if context is None:
         return []
 
     lines = []
     if context.branch:
-        lines.append(f"Branch: {context.branch}")
-    if context.commit_message:
-        lines.append(f"Commit: {context.commit_message}")
+        lines.append(f"🌿 <b>Branch:</b> <code>{_html(context.branch)}</code>")
+    if include_commit and context.commit_message:
+        lines.append("")
+        lines.append("📝 <b>Commit:</b>")
+        lines.append(
+            f"<blockquote>{_html(_compact_text(context.commit_message))}</blockquote>"
+        )
 
-    author = _author_line(context)
-    if author:
-        lines.append(f"Author: {author}")
+    if context.author_name or context.author_email:
+        lines.append("")
+    if context.author_name:
+        lines.append(f"👤 <b>Author:</b> {_html(context.author_name)}")
+    if context.author_email:
+        lines.append(f"📧 <code>{_html(context.author_email)}</code>")
     return lines
 
 
-def _author_line(context: GitHubEventContext) -> str | None:
-    if context.author_name and context.author_email:
-        return f"{context.author_name} <{context.author_email}>"
-    return context.author_name or context.author_email
+def _error_lines(error: str) -> list[str]:
+    return ["", "⚠️ <b>Error:</b>", f"<blockquote>{_html(error)}</blockquote>"]
+
+
+def _html(value: str) -> str:
+    return html.escape(value, quote=False)
+
+
+def _compact_text(value: str) -> str:
+    return " ".join(line.strip() for line in value.splitlines() if line.strip())
 
 
 def create_router(config: CommandsConfig) -> APIRouter:
