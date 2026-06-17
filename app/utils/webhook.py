@@ -6,8 +6,6 @@ import shlex
 import subprocess
 from pathlib import Path
 from typing import Sequence
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
 from loguru import logger
 from pydantic import ValidationError
@@ -142,9 +140,7 @@ def _needs_shell(command: str) -> bool:
     return any(token in command for token in ("|", "&", ";", "<", ">", "$", "`", "\n"))
 
 
-def _change_dir(
-    command: str, args: list[str], cwd: Path
-) -> tuple[CommandResult, Path]:
+def _change_dir(command: str, args: list[str], cwd: Path) -> tuple[CommandResult, Path]:
     if len(args) != 2:
         return (
             CommandResult(
@@ -193,24 +189,3 @@ def _log_command_result(result: CommandResult) -> None:
         logger.info("Webhook command stdout: {}", result.stdout.strip())
     if result.stderr:
         logger.warning("Webhook command stderr: {}", result.stderr.strip())
-
-
-def send_telegram_message(
-    bot_token: str | None, chat_id: str | None, text: str
-) -> bool:
-    if not bot_token or not chat_id:
-        return False
-
-    data = urlencode({"chat_id": chat_id, "text": text}).encode("utf-8")
-    request = Request(
-        f"https://api.telegram.org/bot{bot_token}/sendMessage",
-        data=data,
-        method="POST",
-    )
-
-    try:
-        with urlopen(request, timeout=10):
-            return True
-    except OSError as exc:
-        logger.warning("Telegram notification failed: {}", exc)
-        return False

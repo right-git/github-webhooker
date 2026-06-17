@@ -25,9 +25,10 @@ from app.utils.webhook import (
     CommandExecutionError,
     execute_commands,
     load_commands_config,
-    send_telegram_message,
     verify_github_signature,
 )
+from app.service.notification.telegram.api import TelegramNotificationService
+from app.service.notification.telegram.config import TelegramConfig
 
 
 def github_signature(secret: str, body: bytes) -> str:
@@ -47,6 +48,8 @@ class WebhookConfigTests(unittest.TestCase):
                                 "name": "backend-deploy",
                                 "route": "/webhooks/github/backend",
                                 "secret": "secret",
+                                "push_branches": ["master"],
+                                "merge_branches": ["master"],
                                 "commands": ["echo ok"],
                             }
                         ]
@@ -60,6 +63,8 @@ class WebhookConfigTests(unittest.TestCase):
         self.assertEqual(len(config.github), 1)
         self.assertEqual(config.github[0].name, "backend-deploy")
         self.assertEqual(config.github[0].route, "/webhooks/github/backend")
+        self.assertEqual(config.github[0].push_branches, ["master"])
+        self.assertEqual(config.github[0].merge_branches, ["master"])
 
     def test_missing_commands_config_loads_empty_config(self):
         config = load_commands_config(Path("missing-commands.json"))
@@ -185,9 +190,180 @@ class WebhookHandlerTests(unittest.TestCase):
             name="backend-deploy",
             route="/webhooks/github/backend",
             secret="secret",
+            push_branches=["master"],
             commands=["echo ok"],
         )
-        body = b'{"ref":"refs/heads/master"}'
+        body = json.dumps(
+            {
+                "ref": "refs/heads/master",
+                "created": False,
+                "deleted": False,
+                "head_commit": {
+                    "message": "Deploy backend\n\nKeep it short.",
+                    "author": {
+                        "name": "Alice Example",
+                        "email": "alice@example.com",
+                    },
+                },
+            }
+        ).encode("utf-8")
+        signature = github_signature("secret", body)
+        calls = []
+        notifications = []
+
+        async def runner(commands):
+            calls.append(commands)
+            return []
+
+        async def call_handler():
+            background_tasks = BackgroundTasks()
+            response = await webhook.handle_github_webhook(
+                scenario=scenario,
+                body=body,
+                signature_header=signature,
+                event_header="push",
+                background_tasks=background_tasks,
+                runner=runner,
+            )
+            self.assertEqual(calls, [])
+            with patch.object(
+                webhook.notification_service,
+                "send_text",
+                side_effect=lambda text: notifications.append(text) or True,
+            ):
+                await background_tasks()
+            return response
+
+        response = asyncio.run(call_handler())
+
+        self.assertEqual(response["status"], "success")
+        self.assertEqual(response["name"], "backend-deploy")
+        self.assertEqual(response["message"], "Webhook scenario accepted")
+        self.assertEqual(calls, [["echo ok"]])
+        self.assertIn("Deploy backend", notifications[0])
+        self.assertIn("Alice Example <alice@example.com>", notifications[0])
+
+    def test_handle_github_webhook_ignores_new_branch_push(self):
+        scenario = GitHubWebhookCommand(
+            name="backend-deploy",
+            route="/webhooks/github/backend",
+            secret="secret",
+            push_branches=["master"],
+            commands=["echo ok"],
+        )
+        body = json.dumps(
+            {"ref": "refs/heads/master", "created": True, "deleted": False}
+        ).encode("utf-8")
+        signature = github_signature("secret", body)
+
+        async def runner(commands):
+            raise AssertionError("runner must not be called")
+
+        async def call_handler():
+            background_tasks = BackgroundTasks()
+            response = await webhook.handle_github_webhook(
+                scenario=scenario,
+                body=body,
+                signature_header=signature,
+                event_header="push",
+                background_tasks=background_tasks,
+                runner=runner,
+            )
+            await background_tasks()
+            return response
+
+        response = asyncio.run(call_handler())
+
+        self.assertEqual(response["status"], "ignored")
+
+    def test_handle_github_webhook_ignores_unconfigured_push_branch(self):
+        scenario = GitHubWebhookCommand(
+            name="backend-deploy",
+            route="/webhooks/github/backend",
+            secret="secret",
+            push_branches=["master"],
+            commands=["echo ok"],
+        )
+        body = json.dumps(
+            {"ref": "refs/heads/feature", "created": False, "deleted": False}
+        ).encode("utf-8")
+        signature = github_signature("secret", body)
+
+        async def runner(commands):
+            raise AssertionError("runner must not be called")
+
+        async def call_handler():
+            response = await webhook.handle_github_webhook(
+                scenario=scenario,
+                body=body,
+                signature_header=signature,
+                event_header="push",
+                background_tasks=BackgroundTasks(),
+                runner=runner,
+            )
+            return response
+
+        response = asyncio.run(call_handler())
+
+        self.assertEqual(response["status"], "ignored")
+
+    def test_handle_github_webhook_ignores_non_merge_pull_request_event(self):
+        scenario = GitHubWebhookCommand(
+            name="backend-deploy",
+            route="/webhooks/github/backend",
+            secret="secret",
+            merge_branches=["master"],
+            commands=["echo ok"],
+        )
+        body = json.dumps(
+            {
+                "action": "opened",
+                "pull_request": {
+                    "merged": False,
+                    "base": {"ref": "master"},
+                    "title": "Update backend",
+                },
+            }
+        ).encode("utf-8")
+        signature = github_signature("secret", body)
+
+        async def runner(commands):
+            raise AssertionError("runner must not be called")
+
+        async def call_handler():
+            response = await webhook.handle_github_webhook(
+                scenario=scenario,
+                body=body,
+                signature_header=signature,
+                event_header="pull_request",
+                background_tasks=BackgroundTasks(),
+                runner=runner,
+            )
+            return response
+
+        response = asyncio.run(call_handler())
+
+        self.assertEqual(response["status"], "ignored")
+
+    def test_handle_github_webhook_accepts_configured_merge_event(self):
+        scenario = GitHubWebhookCommand(
+            name="backend-deploy",
+            route="/webhooks/github/backend",
+            secret="secret",
+            merge_branches=["master"],
+            commands=["echo ok"],
+        )
+        body = json.dumps(
+            {
+                "action": "closed",
+                "pull_request": {
+                    "merged": True,
+                    "base": {"ref": "master"},
+                    "title": "Deploy backend",
+                    "user": {"login": "alice"},
+                },
+            }
+        ).encode("utf-8")
         signature = github_signature("secret", body)
         calls = []
 
@@ -201,28 +377,28 @@ class WebhookHandlerTests(unittest.TestCase):
                 scenario=scenario,
                 body=body,
                 signature_header=signature,
+                event_header="pull_request",
                 background_tasks=background_tasks,
                 runner=runner,
             )
-            self.assertEqual(calls, [])
             await background_tasks()
             return response
 
         response = asyncio.run(call_handler())
 
         self.assertEqual(response["status"], "success")
-        self.assertEqual(response["name"], "backend-deploy")
-        self.assertEqual(response["message"], "Webhook scenario accepted")
         self.assertEqual(calls, [["echo ok"]])
 
-    def test_handle_github_webhook_returns_conflict_while_background_task_is_pending(self):
+    def test_handle_github_webhook_returns_conflict_while_background_task_is_pending(
+        self,
+    ):
         scenario = GitHubWebhookCommand(
             name="backend-deploy",
             route="/webhooks/github/backend",
             secret="secret",
             commands=["sleep 1"],
         )
-        body = b"{}"
+        body = b'{"ref":"refs/heads/master","created":false,"deleted":false}'
         signature = github_signature("secret", body)
 
         async def runner(commands):
@@ -234,6 +410,7 @@ class WebhookHandlerTests(unittest.TestCase):
                 scenario=scenario,
                 body=body,
                 signature_header=signature,
+                event_header="push",
                 background_tasks=background_tasks,
                 runner=runner,
             )
@@ -243,6 +420,7 @@ class WebhookHandlerTests(unittest.TestCase):
                     scenario=scenario,
                     body=body,
                     signature_header=signature,
+                    event_header="push",
                     background_tasks=BackgroundTasks(),
                     runner=runner,
                 )
@@ -259,7 +437,7 @@ class WebhookHandlerTests(unittest.TestCase):
             secret="secret",
             commands=["exit 1"],
         )
-        body = b"{}"
+        body = b'{"ref":"refs/heads/master","created":false,"deleted":false}'
         signature = github_signature("secret", body)
         result = CommandResult(
             command="exit 1",
@@ -280,6 +458,7 @@ class WebhookHandlerTests(unittest.TestCase):
                 scenario=scenario,
                 body=body,
                 signature_header=signature,
+                event_header="push",
                 background_tasks=background_tasks,
                 runner=failing_runner,
             )
@@ -291,6 +470,7 @@ class WebhookHandlerTests(unittest.TestCase):
                 scenario=scenario,
                 body=body,
                 signature_header=signature,
+                event_header="push",
                 background_tasks=next_tasks,
                 runner=successful_runner,
             )
@@ -393,17 +573,65 @@ class ManualWebhookHandlerTests(unittest.TestCase):
 
 
 class TelegramNotificationTests(unittest.TestCase):
-    def test_send_telegram_message_skips_missing_settings(self):
-        self.assertFalse(send_telegram_message(None, "1", "ok"))
-        self.assertFalse(send_telegram_message("token", None, "ok"))
-
-    def test_send_telegram_message_posts_to_telegram(self):
-        with patch("app.utils.webhook.urlopen") as urlopen:
-            self.assertTrue(send_telegram_message("token", "123", "deploy ok"))
-
-        request = urlopen.call_args.args[0]
-        self.assertEqual(
-            request.full_url, "https://api.telegram.org/bottoken/sendMessage"
+    def test_telegram_service_skips_missing_settings(self):
+        self.assertFalse(
+            TelegramNotificationService(
+                TelegramConfig(bot_token=None, chat_id="1")
+            ).send_text("ok")
         )
-        self.assertIn(b"chat_id=123", request.data)
-        self.assertIn(b"text=deploy+ok", request.data)
+        self.assertFalse(
+            TelegramNotificationService(
+                TelegramConfig(bot_token="token", chat_id=None)
+            ).send_text("ok")
+        )
+
+    def test_telegram_service_streams_draft_then_sends_final_message(self):
+        service = TelegramNotificationService(
+            TelegramConfig(bot_token="token", chat_id="123")
+        )
+
+        with (
+            patch(
+                "app.service.notification.telegram.api.random.randint", return_value=42
+            ),
+            patch("app.service.notification.telegram.api.time.sleep") as sleep,
+            patch("app.service.notification.telegram.api.urlopen") as urlopen,
+        ):
+            self.assertTrue(service.send_text("deploy <ok>"))
+
+        self.assertEqual(urlopen.call_count, 3)
+        requests = [call.args[0] for call in urlopen.call_args_list]
+        self.assertEqual(
+            [request.full_url for request in requests],
+            [
+                "https://api.telegram.org/bottoken/sendMessageDraft",
+                "https://api.telegram.org/bottoken/sendMessageDraft",
+                "https://api.telegram.org/bottoken/sendMessage",
+            ],
+        )
+        self.assertEqual(
+            [json.loads(request.data.decode("utf-8")) for request in requests],
+            [
+                {
+                    "chat_id": "123",
+                    "draft_id": 42,
+                    "text": "deploy",
+                    "parse_mode": "HTML",
+                },
+                {
+                    "chat_id": "123",
+                    "draft_id": 42,
+                    "text": "deploy &lt;ok&gt;",
+                    "parse_mode": "HTML",
+                },
+                {
+                    "chat_id": "123",
+                    "text": "deploy &lt;ok&gt;",
+                    "parse_mode": "HTML",
+                },
+            ],
+        )
+        self.assertEqual(
+            [call.args[0] for call in sleep.call_args_list],
+            [0.2, 0.2],
+        )

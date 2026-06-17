@@ -23,6 +23,8 @@ Example:
       "name": "backend-deploy",
       "route": "/webhooks/github/backend",
       "secret": "CHANGE_ME",
+      "push_branches": ["master"],
+      "merge_branches": ["master"],
       "commands": [
         "cd /path/to/project",
         "git pull origin master",
@@ -52,9 +54,22 @@ Example:
 Fields:
 
 - `name` - readable scenario name used in logs and API responses.
-- `route` - POST path FastAPI registers for this scenario.
+- `route` - path FastAPI registers for this scenario.
 - `secret` - GitHub webhook secret. Use the same value in GitHub settings.
+- `push_branches` - optional list of branch names that can trigger commands on
+  GitHub `push` events. If omitted, push events to existing branches are allowed.
+- `merge_branches` - optional list of target branches that can trigger commands
+  on merged GitHub pull requests. If omitted, pull request events are ignored.
 - `commands` - commands executed in order after the signature is valid.
+
+GitHub branch filters prevent accidental deploys:
+
+- New branch pushes are ignored.
+- Deleted branch pushes are ignored.
+- Pull request events are ignored unless the action is a real merge into a
+  configured `merge_branches` target.
+- If both GitHub push and pull request events are enabled for the same route,
+  configure only the trigger you actually want to avoid duplicate deploys.
 
 `manual` entries create browser-openable routes. Open the configured `route` in
 the browser, enter any username and the configured `password`, and the service
@@ -104,6 +119,10 @@ CHAT_ID=123456789
 ```
 
 If either value is empty, notifications are skipped.
+
+Completion/failure notifications include the scenario name, command count or
+failed command, branch, a short commit message, and the commit author's name and
+email when GitHub sends them in the payload.
 
 ## Commands Requiring Root
 

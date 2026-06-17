@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -31,6 +31,20 @@ class RateLimitConfig(BaseModel):
 
 class GitHubWebhookCommand(WebhookCommandBase):
     secret: str = Field(min_length=1)
+    push_branches: Optional[List[str]] = None
+    merge_branches: List[str] = Field(default_factory=list)
+
+    @field_validator("push_branches", "merge_branches")
+    @classmethod
+    def branches_must_not_be_blank(
+        cls, value: Optional[List[str]]
+    ) -> Optional[List[str]]:
+        if value is None:
+            return value
+        for branch in value:
+            if not branch.strip():
+                raise ValueError("branches must not contain blank values")
+        return value
 
 
 class ManualWebhookCommand(WebhookCommandBase):

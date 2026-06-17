@@ -21,10 +21,11 @@ volumes/
 .vscode/
 
 # Log files
-requests.log
-
+logs/
 # Keys
 certs/
 
 # Others
 .history/
+
+test.py

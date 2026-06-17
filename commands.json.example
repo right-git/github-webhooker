@@ -4,6 +4,8 @@
       "name": "backend-deploy",
       "route": "/webhooks/github/backend",
       "secret": "CHANGE_ME",
+      "push_branches": ["master"],
+      "merge_branches": ["master"],
       "commands": [
         "cd /path/to/project",
         "git pull origin master",

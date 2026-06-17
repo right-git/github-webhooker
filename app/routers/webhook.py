@@ -2,9 +2,12 @@ import asyncio
 import base64
 import binascii
 import hmac
+import json
+import re
 import threading
 import time
-from typing import Awaitable, Callable, Sequence
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, Sequence
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -18,17 +21,36 @@ from app.models.webhook import (
     ManualWebhookCommand,
     WebhookCommandBase,
 )
+from app.service.notification import NotificationService
 from app.utils.webhook import (
     CommandExecutionError,
     load_commands_config,
     run_commands_async,
-    send_telegram_message,
     verify_github_signature,
 )
 
 WebhookRunner = Callable[[Sequence[str]], Awaitable[list[CommandResult]]]
 _scenario_locks: dict[str, threading.Lock] = {}
 _manual_rate_limits: dict[tuple[str, str], list[float]] = {}
+notification_service = NotificationService.from_telegram(
+    settings.bot_token, settings.chat_id
+)
+
+
+@dataclass(frozen=True)
+class GitHubEventContext:
+    event: str
+    branch: str | None = None
+    commit_message: str | None = None
+    author_name: str | None = None
+    author_email: str | None = None
+
+
+@dataclass(frozen=True)
+class GitHubEventDecision:
+    should_run: bool
+    reason: str
+    context: GitHubEventContext | None = None
 
 
 async def _run_configured_commands(commands: Sequence[str]) -> list[CommandResult]:
@@ -39,6 +61,7 @@ async def handle_github_webhook(
     scenario: GitHubWebhookCommand,
     body: bytes,
     signature_header: str | None,
+    event_header: str | None = None,
     background_tasks: BackgroundTasks | None = None,
     runner: WebhookRunner = _run_configured_commands,
 ) -> dict:
@@ -48,6 +71,22 @@ async def handle_github_webhook(
             status_code=401,
             detail={"status": "error", "message": "Invalid GitHub signature"},
         )
+
+    payload = _load_github_payload(body)
+    decision = _github_event_decision(scenario, event_header, payload)
+    if not decision.should_run:
+        logger.info(
+            "GitHub webhook ignored: name={} event={} reason={}",
+            scenario.name,
+            event_header,
+            decision.reason,
+        )
+        return {
+            "status": "ignored",
+            "message": "GitHub event ignored",
+            "name": scenario.name,
+            "reason": decision.reason,
+        }
 
     lock = _scenario_locks.setdefault(scenario.route, threading.Lock())
     if not lock.acquire(blocking=False):
@@ -65,12 +104,142 @@ async def handle_github_webhook(
         background_tasks = BackgroundTasks()
 
     logger.info("GitHub webhook accepted: {}", scenario.name)
-    background_tasks.add_task(_run_webhook_commands, scenario, lock, runner)
+    background_tasks.add_task(
+        _run_webhook_commands, scenario, lock, runner, decision.context
+    )
     return {
         "status": "success",
         "message": "Webhook scenario accepted",
         "name": scenario.name,
     }
+
+
+def _load_github_payload(body: bytes) -> dict[str, Any]:
+    try:
+        payload = json.loads(body.decode("utf-8") or "{}")
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"status": "error", "message": "Invalid GitHub JSON payload"},
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=400,
+            detail={"status": "error", "message": "Invalid GitHub JSON payload"},
+        )
+    return payload
+
+
+def _github_event_decision(
+    scenario: GitHubWebhookCommand, event: str | None, payload: dict[str, Any]
+) -> GitHubEventDecision:
+    if event == "push":
+        return _push_event_decision(scenario, payload)
+    if event == "pull_request":
+        return _pull_request_event_decision(scenario, payload)
+    return GitHubEventDecision(False, "unsupported-event")
+
+
+def _push_event_decision(
+    scenario: GitHubWebhookCommand, payload: dict[str, Any]
+) -> GitHubEventDecision:
+    if payload.get("created") or payload.get("deleted"):
+        return GitHubEventDecision(False, "branch-created-or-deleted")
+
+    branch = _branch_from_ref(payload.get("ref"))
+    if not branch:
+        return GitHubEventDecision(False, "missing-branch")
+    if not _branch_allowed(branch, scenario.push_branches):
+        return GitHubEventDecision(False, "push-branch-not-allowed")
+
+    commit = _mapping(payload.get("head_commit"))
+    author = _mapping(commit.get("author"))
+    return GitHubEventDecision(
+        True,
+        "push-branch-allowed",
+        GitHubEventContext(
+            event="push",
+            branch=branch,
+            commit_message=_short_text(commit.get("message")),
+            author_name=_string_or_none(author.get("name")),
+            author_email=_string_or_none(author.get("email")),
+        ),
+    )
+
+
+def _pull_request_event_decision(
+    scenario: GitHubWebhookCommand, payload: dict[str, Any]
+) -> GitHubEventDecision:
+    pull_request = _mapping(payload.get("pull_request"))
+    if payload.get("action") != "closed" or pull_request.get("merged") is not True:
+        return GitHubEventDecision(False, "pull-request-not-merged")
+
+    base = _mapping(pull_request.get("base"))
+    branch = _normalize_branch(_string_or_none(base.get("ref")))
+    if not branch:
+        return GitHubEventDecision(False, "missing-merge-branch")
+    if not _branch_allowed(branch, scenario.merge_branches):
+        return GitHubEventDecision(False, "merge-branch-not-allowed")
+
+    merged_by = _mapping(pull_request.get("merged_by"))
+    user = _mapping(pull_request.get("user"))
+    return GitHubEventDecision(
+        True,
+        "merge-branch-allowed",
+        GitHubEventContext(
+            event="pull_request",
+            branch=branch,
+            commit_message=_short_text(pull_request.get("title")),
+            author_name=_string_or_none(merged_by.get("login"))
+            or _string_or_none(user.get("login")),
+        ),
+    )
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _string_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _branch_from_ref(ref: Any) -> str | None:
+    if not isinstance(ref, str):
+        return None
+    if not ref.startswith("refs/heads/"):
+        return None
+    return _normalize_branch(ref)
+
+
+def _normalize_branch(branch: str | None) -> str | None:
+    if not branch:
+        return None
+    if branch.startswith("refs/heads/"):
+        return branch.removeprefix("refs/heads/")
+    return branch
+
+
+def _branch_allowed(branch: str, allowed_branches: Sequence[str] | None) -> bool:
+    if allowed_branches is None:
+        return True
+    allowed = {_normalize_branch(item) for item in allowed_branches}
+    return branch in allowed
+
+
+def _short_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    compact = " ".join(line.strip() for line in value.splitlines() if line.strip())
+    if not compact:
+        return None
+
+    sentences = re.split(r"(?<=[.!?])\s+", compact)
+    short = " ".join(sentences[:2])
+    if len(short) > 240:
+        return f"{short[:237].rstrip()}..."
+    return short
 
 
 async def handle_manual_webhook(
@@ -118,7 +287,9 @@ def _allow_manual_request(scenario: ManualWebhookCommand, client_id: str) -> boo
     key = (scenario.route, client_id)
     window_start = now - scenario.rate_limit.seconds
     attempts = [
-        attempt for attempt in _manual_rate_limits.get(key, []) if attempt > window_start
+        attempt
+        for attempt in _manual_rate_limits.get(key, [])
+        if attempt > window_start
     ]
     if len(attempts) >= scenario.rate_limit.requests:
         _manual_rate_limits[key] = attempts
@@ -155,6 +326,7 @@ async def _run_webhook_commands(
     scenario: WebhookCommandBase,
     lock: threading.Lock,
     runner: WebhookRunner,
+    context: GitHubEventContext | None = None,
 ) -> None:
     try:
         logger.info("Webhook background started: {}", scenario.name)
@@ -165,28 +337,78 @@ async def _run_webhook_commands(
             scenario.name,
             exc.result.command,
         )
-        await _notify(
-            f"Webhook failed: {scenario.name}\n"
-            f"Command: {exc.result.command}\n"
-            f"Error: {exc.result.stderr or exc.result.returncode}"
-        )
+        await _notify(_failure_message(scenario, exc.result, context))
     except Exception as exc:
         logger.exception("Webhook failed: name={} error={}", scenario.name, exc)
-        await _notify(f"Webhook failed: {scenario.name}\nError: {exc}")
+        await _notify(_unexpected_failure_message(scenario, exc, context))
     else:
         logger.info("Webhook completed: {}", scenario.name)
-        await _notify(
-            f"Webhook completed: {scenario.name}\n"
-            f"Commands executed: {len(results)}"
-        )
+        await _notify(_success_message(scenario, results, context))
     finally:
         lock.release()
 
 
 async def _notify(text: str) -> None:
-    await asyncio.to_thread(
-        send_telegram_message, settings.bot_token, settings.chat_id, text
-    )
+    await asyncio.to_thread(notification_service.send_text, text)
+
+
+def _success_message(
+    scenario: WebhookCommandBase,
+    results: Sequence[CommandResult],
+    context: GitHubEventContext | None,
+) -> str:
+    lines = [
+        f"Webhook completed: {scenario.name}",
+        f"Commands executed: {len(results)}",
+    ]
+    lines.extend(_context_lines(context))
+    return "\n".join(lines)
+
+
+def _failure_message(
+    scenario: WebhookCommandBase,
+    result: CommandResult,
+    context: GitHubEventContext | None,
+) -> str:
+    lines = [
+        f"Webhook failed: {scenario.name}",
+        f"Command: {result.command}",
+        f"Error: {result.stderr or result.returncode}",
+    ]
+    lines.extend(_context_lines(context))
+    return "\n".join(lines)
+
+
+def _unexpected_failure_message(
+    scenario: WebhookCommandBase,
+    exc: Exception,
+    context: GitHubEventContext | None,
+) -> str:
+    lines = [f"Webhook failed: {scenario.name}", f"Error: {exc}"]
+    lines.extend(_context_lines(context))
+    return "\n".join(lines)
+
+
+def _context_lines(context: GitHubEventContext | None) -> list[str]:
+    if context is None:
+        return []
+
+    lines = []
+    if context.branch:
+        lines.append(f"Branch: {context.branch}")
+    if context.commit_message:
+        lines.append(f"Commit: {context.commit_message}")
+
+    author = _author_line(context)
+    if author:
+        lines.append(f"Author: {author}")
+    return lines
+
+
+def _author_line(context: GitHubEventContext) -> str | None:
+    if context.author_name and context.author_email:
+        return f"{context.author_name} <{context.author_email}>"
+    return context.author_name or context.author_email
 
 
 def create_router(config: CommandsConfig) -> APIRouter:
@@ -235,6 +457,7 @@ def _github_endpoint(scenario: GitHubWebhookCommand):
             scenario=scenario,
             body=await request.body(),
             signature_header=request.headers.get("X-Hub-Signature-256"),
+            event_header=request.headers.get("X-GitHub-Event"),
             background_tasks=background_tasks,
         )
 
