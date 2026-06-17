@@ -1,6 +1,4 @@
 import json
-import random
-import time
 from urllib.request import Request, urlopen
 
 from loguru import logger
@@ -19,22 +17,6 @@ class TelegramNotificationService:
     def send(self, message: TelegramMessage) -> bool:
         if not self._config.is_configured:
             return False
-
-        draft_id = random.randint(1, 2**63 - 1)
-        current_text = ""
-        for chunk in message.text.split():
-            current_text = f"{current_text}{chunk} "
-            if not self._telegram(
-                "sendMessageDraft",
-                {
-                    "chat_id": self._config.chat_id,
-                    "draft_id": draft_id,
-                    "text": current_text.strip(),
-                    "parse_mode": "HTML",
-                },
-            ):
-                return False
-            time.sleep(0.2)
 
         return self._telegram(
             "sendMessage",

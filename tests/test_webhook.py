@@ -628,54 +628,26 @@ class TelegramNotificationTests(unittest.TestCase):
             ).send_text("ok")
         )
 
-    def test_telegram_service_streams_draft_then_sends_final_message(self):
+    def test_telegram_service_sends_single_html_message(self):
         service = TelegramNotificationService(
             TelegramConfig(bot_token="token", chat_id="123")
         )
 
-        with (
-            patch(
-                "app.service.notification.telegram.api.random.randint", return_value=42
-            ),
-            patch("app.service.notification.telegram.api.time.sleep") as sleep,
-            patch("app.service.notification.telegram.api.urlopen") as urlopen,
-        ):
+        with patch("app.service.notification.telegram.api.urlopen") as urlopen:
             self.assertTrue(service.send_text("deploy <b>ok</b>"))
 
-        self.assertEqual(urlopen.call_count, 3)
-        requests = [call.args[0] for call in urlopen.call_args_list]
+        self.assertEqual(urlopen.call_count, 1)
+        request = urlopen.call_args.args[0]
         self.assertEqual(
-            [request.full_url for request in requests],
-            [
-                "https://api.telegram.org/bottoken/sendMessageDraft",
-                "https://api.telegram.org/bottoken/sendMessageDraft",
-                "https://api.telegram.org/bottoken/sendMessage",
-            ],
+            request.full_url,
+            "https://api.telegram.org/bottoken/sendMessage",
         )
         self.assertEqual(
-            [json.loads(request.data.decode("utf-8")) for request in requests],
-            [
-                {
-                    "chat_id": "123",
-                    "draft_id": 42,
-                    "text": "deploy",
-                    "parse_mode": "HTML",
-                },
-                {
-                    "chat_id": "123",
-                    "draft_id": 42,
-                    "text": "deploy <b>ok</b>",
-                    "parse_mode": "HTML",
-                },
-                {
-                    "chat_id": "123",
-                    "text": "deploy <b>ok</b>",
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": True,
-                },
-            ],
-        )
-        self.assertEqual(
-            [call.args[0] for call in sleep.call_args_list],
-            [0.2, 0.2],
+            json.loads(request.data.decode("utf-8")),
+            {
+                "chat_id": "123",
+                "text": "deploy <b>ok</b>",
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            },
         )
